@@ -147,6 +147,29 @@ namespace RClauncher {
             return CallNextHookEx(hook, code, wParam, lParam);
         }
     }
+    public static class FolderIcon {
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
+        private struct ShellFileInfo {
+            public IntPtr icon;
+            public int iconIndex;
+            public uint attributes;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)]
+            public string displayName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=80)]
+            public string typeName;
+        }
+        [DllImport("shell32.dll", CharSet=CharSet.Auto)]
+        private static extern IntPtr SHGetFileInfo(string path, uint attributes, out ShellFileInfo info, uint size, uint flags);
+        [DllImport("user32.dll", SetLastError=true)]
+        private static extern bool DestroyIcon(IntPtr icon);
+
+        public static IntPtr Get(string path) {
+            ShellFileInfo info;
+            SHGetFileInfo(path, 0, out info, (uint)Marshal.SizeOf(typeof(ShellFileInfo)), 0x100 | 0x1);
+            return info.icon;
+        }
+        public static void Release(IntPtr icon) { if (icon != IntPtr.Zero) DestroyIcon(icon); }
+    }
 }
 '@
 
@@ -398,7 +421,40 @@ function Save-FolderHistory {
     [IO.File]::WriteAllLines($script:FolderHistoryPath, $script:FolderHistory, [Text.UTF8Encoding]::new($false))
 }
 
-function Set-MenuState([bool]$Visible) { $script:MenuVisible = $Visible }
+function Set-PopupMenuState($Menu, [bool]$Visible) {
+    if ($Visible) {
+        $script:CurrentPopupMenu = $Menu
+        $script:MenuVisible = $true
+    } elseif ($script:CurrentPopupMenu -eq $Menu) {
+        $script:CurrentPopupMenu = $null
+        $script:MenuVisible = $false
+    }
+}
+
+function Test-ActivePopupMenu {
+    $menu = $script:CurrentPopupMenu
+    if (-not $menu) {
+        $script:MenuVisible = $false
+        return $false
+    }
+    try {
+        if ($menu.IsDisposed -or -not $menu.Visible) {
+            if ($script:CurrentPopupMenu -eq $menu) {
+                $script:CurrentPopupMenu = $null
+                $script:MenuVisible = $false
+            }
+            return $false
+        }
+        $script:MenuVisible = $true
+        return $true
+    } catch [ObjectDisposedException] {
+        if ($script:CurrentPopupMenu -eq $menu) {
+            $script:CurrentPopupMenu = $null
+            $script:MenuVisible = $false
+        }
+        return $false
+    }
+}
 
 function Test-PopupContainsPoint($Menu, [Drawing.Point]$Point) {
     if ($Menu.Visible -and $Menu.Bounds.Contains($Point)) { return $true }
@@ -451,10 +507,9 @@ function New-ClipMenu {
     })
     [void]$menu.Items.Add($clear)
     $menu.Add_Closed({
-        Set-MenuState $false
-        if ($script:CurrentPopupMenu -eq $this) { $script:CurrentPopupMenu = $null }
+        Set-PopupMenuState $this $false
     })
-    $menu.Add_Opened({ Set-MenuState $true; $script:CurrentPopupMenu = $this })
+    $menu.Add_Opened({ Set-PopupMenuState $this $true })
     return $menu
 }
 
@@ -466,9 +521,20 @@ function Get-FolderChildren([string]$Path) {
     } catch { Write-Log "Cannot list folders '$Path': $_"; return @() }
 }
 
+function Set-FolderMenuIcon([Windows.Forms.ToolStripMenuItem]$Item, [string]$Path) {
+    if (-not $script:Config.folder_menu.show_icons -or -not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    $iconHandle = [IntPtr]::Zero
+    try {
+        $iconHandle = [RClauncher.FolderIcon]::Get($Path)
+        if ($iconHandle -ne [IntPtr]::Zero) { $Item.Image = [Drawing.Icon]::FromHandle($iconHandle).ToBitmap() }
+    } catch { Write-Log "Cannot load folder icon '$Path': $_" }
+    finally { [RClauncher.FolderIcon]::Release($iconHandle) }
+}
+
 function Add-FolderSubmenu([Windows.Forms.ToolStripMenuItem]$Item, [string]$Path, [int]$Depth) {
     if ($Depth -ge 16) { return }
     $Item.Tag = $Path
+    Set-FolderMenuIcon $Item $Path
     $Item.AccessibleDescription = [string]$Depth
     $Item.Add_MouseUp({
         if ($_.Button -eq [Windows.Forms.MouseButtons]::Right) {
@@ -487,6 +553,7 @@ function Add-FolderSubmenu([Windows.Forms.ToolStripMenuItem]$Item, [string]$Path
         $currentDepth = [int]$this.AccessibleDescription
         $open = [Windows.Forms.ToolStripMenuItem]::new('このフォルダを開く')
         $open.Tag = $currentPath
+        Set-FolderMenuIcon $open $currentPath
         $open.Add_Click({ Open-LauncherFolder ([string]$this.Tag) })
         [void]$this.DropDownItems.Add($open)
         [void]$this.DropDownItems.Add([Windows.Forms.ToolStripSeparator]::new())
@@ -547,10 +614,9 @@ function Show-ShellContextMenu([string]$Path) {
             [void]$menu.Items.Add($entry)
         }
         if ($menu.Items.Count -gt 0) {
-            $menu.Add_Opened({ Set-MenuState $true; $script:CurrentPopupMenu = $this })
+            $menu.Add_Opened({ Set-PopupMenuState $this $true })
             $menu.Add_Closed({
-                Set-MenuState $false
-                if ($script:CurrentPopupMenu -eq $this) { $script:CurrentPopupMenu = $null }
+                Set-PopupMenuState $this $false
             })
             $menu.Show([Windows.Forms.Cursor]::Position)
         }
@@ -600,6 +666,7 @@ function New-FolderMenu {
         foreach ($path in @($script:FolderHistory | Select-Object -First $script:Config.folder_menu.history_max)) {
             $entry = [Windows.Forms.ToolStripMenuItem]::new($path)
             $entry.Tag = $path
+            Set-FolderMenuIcon $entry $path
             $entry.Add_Click({ Open-LauncherFolder ([string]$this.Tag) })
             [void]$history.DropDownItems.Add($entry)
         }
@@ -619,34 +686,29 @@ function New-FolderMenu {
         $clear.Add_Click({ $script:FolderHistory.Clear(); Save-FolderHistory })
         [void]$menu.Items.Add($clear)
     }
-    $menu.Add_Closed({ Set-MenuState $false })
-    $menu.Add_Opened({ Set-MenuState $true })
     $menu.Add_Closed({
-        if ($script:CurrentPopupMenu -eq $this) { $script:CurrentPopupMenu = $null }
+        Set-PopupMenuState $this $false
         foreach ($menuItem in $this.Items) {
             if ($menuItem -is [Windows.Forms.ToolStripControlHost] -and $menuItem.Tag) { $menuItem.Tag.Dispose() }
         }
-        $script:CurrentFolderMenu = $null
+        if ($script:CurrentFolderMenu -eq $this) { $script:CurrentFolderMenu = $null }
     })
-    $menu.Add_Closed({ Set-MenuState $false })
-    $menu.Add_Opened({ Set-MenuState $true; $script:CurrentPopupMenu = $this })
+    $menu.Add_Opened({ Set-PopupMenuState $this $true })
     return $menu
 }
 
 function Show-ClipMenu([int]$X, [int]$Y) {
-    if ($script:MenuVisible) { return }
+    if (Test-ActivePopupMenu) { return }
     $menu = New-ClipMenu
     $script:CurrentPopupMenu = $menu
-    Set-MenuState $true
     $menu.Show([Drawing.Point]::new($X, $Y))
 }
 
 function Show-FolderMenu([int]$X, [int]$Y) {
-    if ($script:MenuVisible) { return }
+    if (Test-ActivePopupMenu) { return }
     $menu = New-FolderMenu
     $script:CurrentFolderMenu = $menu
     $script:CurrentPopupMenu = $menu
-    Set-MenuState $true
     $menu.Show([Drawing.Point]::new($X, $Y))
 }
 
@@ -838,15 +900,14 @@ function Show-TrayMenu {
     $exit=[Windows.Forms.ToolStripMenuItem]::new('終了')
     $exit.Add_Click({ $script:Form.Close() }); [void]$menu.Items.Add($exit)
     $script:Tray.ContextMenuStrip=$menu
-    $menu.Add_Opened({ Set-MenuState $true; $script:CurrentPopupMenu = $this })
+    $menu.Add_Opened({ Set-PopupMenuState $this $true })
     $menu.Add_Closed({
-        Set-MenuState $false
-        if ($script:CurrentPopupMenu -eq $this) { $script:CurrentPopupMenu = $null }
+        Set-PopupMenuState $this $false
     })
 }
 
 function Invoke-MouseHook([uint32]$Message, [int]$X, [int]$Y, [uint32]$Time) {
-    if ($script:MenuVisible) {
+    if (Test-ActivePopupMenu) {
         if ($Message -in @(0x0201,0x0204) -and $script:CurrentPopupMenu) {
             $point = [Drawing.Point]::new($X,$Y)
             if (-not (Test-PopupContainsPoint $script:CurrentPopupMenu $point)) {
