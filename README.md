@@ -1,6 +1,6 @@
 # RClauncher（PowerShell版）
 
-Windows PowerShell 5.1 以降で動作する、常駐型のクリック起動ランチャーです。ランチャー本体は単一の `.ps1` ファイルで構成されています。
+Windows PowerShell 5.1 以降で動作する、常駐型のクリック起動ランチャーです。起動処理と機能ごとの `.ps1` ファイルで構成されています。
 
 ## 起動方法
 
@@ -28,3 +28,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\rclauncher.ps1
 - グローバルマウスフックを使用するため、管理者権限で実行中のアプリ上で操作を検知するには、ランチャーも管理者権限で実行する必要があります。
 - Explorerの右クリックメニューは、Windows Shellから取得した項目で構成されます。元のRust版とは異なり、各シェル拡張機能にメニューの描画を依頼する処理はありません。
 - Explorerのリストビューを検査できない場合（デスクトップのアイコン一覧が別の権限で実行されている場合など）、アイコン上のクリックを空白部分のクリックとして扱いません。
+
+## ファイル構成
+
+- `rclauncher.ps1`: 起動処理、共有状態の初期化、機能ファイルの読み込み
+- `functions\Native.ps1`: マウスフックなどのネイティブ連携
+- `functions\Config.ps1`: 設定の読み込み・保存
+- `functions\History.ps1`: クリップボード・フォルダー履歴
+- `functions\Menus.ps1`: 各種メニューとフォルダー／アプリの起動
+- `functions\Settings.ps1`: 設定画面
+- `functions\Runtime.ps1`: トレイ、イベント処理、ランチャーの起動・終了
+
+起動時に `rclauncher.ps1` が `functions` フォルダー内のファイルをドットソースします。動作にはこのフォルダーも必要です。
